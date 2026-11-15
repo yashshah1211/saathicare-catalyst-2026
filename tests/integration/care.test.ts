@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { FieldValue } from 'firebase-admin/firestore'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { accept, acknowledge, invite, optIn, removeMember, revoke } from '../../src/lib/server/circle'
 import { handoff } from '../../src/lib/server/handoff'
 import { type Actor, db } from '../../src/lib/server/platform'
 import { runReminders } from '../../src/lib/server/reminders'
-import { createProfile, dashboard, deleteAppointment, deleteMedication, listProfiles, profileRef, respondToDose, saveAppointment, saveMedication, settings } from '../../src/lib/server/store'
+import { createProfile, dashboard, deleteAppointment, deleteMedication, inbox, listProfiles, profileRef, respondToDose, saveAppointment, saveMedication, settings } from '../../src/lib/server/store'
 import { DAY, localInstant, MINUTE } from '../../src/lib/time'
 
 const tz = 'Asia/Kolkata'
@@ -17,6 +18,14 @@ const outsider = makeActor('outsider')
 const unverified = makeActor('unverified', false)
 const medication = { name: 'Example tablet', instructions: 'Fictional instructions', times: ['10:00', '12:00'], timezone: tz }
 let profile: ReturnType<typeof profileRef>
+
+async function appointmentReminderFixture(at: number, localStart: string) {
+  const actor = makeActor('appointment-owner')
+  const target = profileRef((await createProfile(actor, { name: 'Reminder fixture', timezone: tz }, at)).id)
+  await settings(target, actor, { doseEmail: false, appointmentEmail: true, escalation: false, aiConsent: false, graceMinutes: 45 }, at)
+  await saveAppointment(target, actor, { title: 'Example visit', location: '', timezone: tz, localStart }, undefined, at)
+  return { actor, target }
+}
 
 describe('Firestore care circle and reminder pipeline', () => {
   beforeAll(async () => {
@@ -78,7 +87,8 @@ describe('Firestore care circle and reminder pipeline', () => {
     const valid = async () => true
     const beforeSecond = localInstant('2026-11-15', '11:55', tz)
     const run = async (at: number) => {
-      const ticks = await Promise.all([runReminders(at, deliver, valid), runReminders(at, deliver, valid)])
+      const delivery = { provider: 'resend', send: deliver } as const
+      const ticks = await Promise.all([runReminders(at, delivery, valid), runReminders(at, delivery, valid)])
       expect(ticks.map((tick) => tick.errors)).toEqual([0, 0])
     }
     await run(beforeSecond)
@@ -128,5 +138,54 @@ describe('Firestore care circle and reminder pipeline', () => {
     expect((await dashboard(lateProfile, owner, afterMidnight)).doses.map((dose) => dose.status)).toEqual(['snoozed', 'pending'])
     await respondToDose(lateProfile, owner, previous.id, { action: 'taken', expectedSnoozes: 1, expectedStatus: 'snoozed' }, afterMidnight)
     expect((await dashboard(lateProfile, owner, afterMidnight)).doses[0].status).toBe('taken')
+  })
+
+  it('does not replay an SMTP attempt after a worker loses its lease', async () => {
+    const at = localInstant('2026-11-20', '11:00', tz)
+    const { actor, target } = await appointmentReminderFixture(at, '2026-11-20T16:00')
+    const started = Promise.withResolvers<void>()
+    const response = Promise.withResolvers<'sent'>()
+    const send = vi.fn(() => { started.resolve(); return response.promise })
+    const delivery = { provider: 'gmail', send } as const
+    const verified = async () => true
+    const tick = runReminders(at, delivery, verified)
+    try {
+      await Promise.race([started.promise, tick.then(() => { throw new Error('The SMTP attempt did not start.') })])
+      expect((await runReminders(at, delivery, verified)).errors).toBe(0)
+      expect((await runReminders(at + 2 * MINUTE, delivery, verified)).errors).toBe(0)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect((await dashboard(target, actor, at)).notifications[0].status).toBe('uncertain')
+    } finally {
+      response.resolve('sent')
+      await tick
+    }
+    expect((await dashboard(target, actor, at)).notifications[0].status).toBe('uncertain')
+  })
+
+  it('replays a legacy Resend attempt only on Resend with its original notification ID', async () => {
+    const at = localInstant('2026-11-21', '11:00', tz)
+    const { actor, target } = await appointmentReminderFixture(at, '2026-11-21T16:00')
+    const send = vi.fn<(mail: { id: string }) => Promise<'retry'>>().mockResolvedValue('retry')
+    const resend = { provider: 'resend', send } as const
+    const verified = async () => true
+    expect((await runReminders(at, resend, verified)).errors).toBe(0)
+    const { members, notifications } = await dashboard(target, actor, at)
+    const ref = inbox(target, members[0]).doc(notifications[0].id)
+    await ref.update({ deliveryProvider: FieldValue.delete() })
+    expect((await runReminders(at + 2 * MINUTE, resend, verified)).errors).toBe(0)
+    expect(send.mock.calls.map(([mail]) => mail.id)).toEqual([notifications[0].id, notifications[0].id])
+    const sendGmail = vi.fn(async () => 'sent' as const)
+    expect((await runReminders(at + 6 * MINUTE, { provider: 'gmail', send: sendGmail }, verified)).errors).toBe(0)
+    expect(sendGmail).not.toHaveBeenCalled()
+    expect((await dashboard(target, actor, at)).notifications[0].status).toBe('uncertain')
+  })
+
+  it('retains an in-app reminder when outbound delivery is disabled', async () => {
+    const at = localInstant('2026-11-22', '11:00', tz)
+    const { actor, target } = await appointmentReminderFixture(at, '2026-11-22T16:00')
+    const verify = vi.fn(async () => true)
+    expect(await runReminders(at, null, verify)).toMatchObject({ errors: 0, emailConfigured: false })
+    expect(verify).not.toHaveBeenCalled()
+    expect((await dashboard(target, actor, at)).notifications[0]).toMatchObject({ kind: 'appointment', status: 'failed' })
   })
 })

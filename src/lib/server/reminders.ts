@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { DocumentReference, Transaction } from 'firebase-admin/firestore'
 import type { Activity, Appointment, Dose, Medication, Member, Notification, Profile } from '../model'
 import { MINUTE, nextDay } from '../time'
-import { auth, db, emailConfigured } from './platform'
+import { createEmailDelivery, type Delivery } from './email'
+import { auth, db, emailConfig } from './platform'
 import { audit, inbox, type Job, jobRef, profileRef, rollMedication, scheduleDay } from './store'
 
 interface Mail extends Notification {
@@ -12,11 +13,10 @@ interface Mail extends Notification {
   revision: number
   slot: number
   firstAttemptAt?: number
+  deliveryProvider?: Delivery['provider']
   lease?: string
   attempts: number
 }
-
-type Delivery = (mail: { id: string; to: string; kind: Mail['kind'] }) => Promise<'sent' | 'retry' | 'failed'>
 
 async function prepareMail(tx: Transaction, profile: DocumentReference, member: Member, kind: Mail['kind'], source: { id: string; occurrence: string; label: string; revision: number; slot: number }, now: number) {
   const id = `${kind}_${source.occurrence}_${source.slot}_${member.feedId}`
@@ -103,7 +103,7 @@ async function stillRelevant(tx: Transaction, profile: DocumentReference, data: 
   return med?.revision === mail.revision
 }
 
-async function claim(jobDoc: DocumentReference, now: number) {
+async function claim(jobDoc: DocumentReference, now: number, provider?: Delivery['provider']) {
   return db().runTransaction(async (tx) => {
     const job = (await tx.get(jobDoc)).data() as Job | undefined
     if (!job || job.kind !== 'mail' || job.nextAt > now) return null
@@ -115,38 +115,62 @@ async function claim(jobDoc: DocumentReference, now: number) {
     const data = dataRecord.data() as Profile | undefined
     const member = memberRecord.data() as Member | undefined
     const relevant = data && member?.feedId === job.feedId && member.email === mail.to && await stillRelevant(tx, profile, data, member, mail, now)
-    // Resend keeps idempotency keys for 24 hours. Stop well before that window ends.
-    const expired = mail.firstAttemptAt !== undefined && now - mail.firstAttemptAt >= 20 * 60 * MINUTE
-    if (!relevant || expired) {
-      tx.update(ref, { status: mail.attempts ? 'uncertain' : 'canceled' })
+    // Only Resend can replay an attempted send, on the same provider and within its idempotency window.
+    const attemptedAt = mail.firstAttemptAt
+    const canReplay = attemptedAt === undefined || (provider === 'resend' && (mail.deliveryProvider ?? 'resend') === provider
+      && now - attemptedAt < 20 * 60 * MINUTE)
+    if (!relevant || !canReplay || !provider) {
+      const unsentStatus = relevant ? 'failed' : 'canceled'
+      tx.update(ref, { status: attemptedAt === undefined ? unsentStatus : 'uncertain' })
       tx.delete(jobDoc)
       return null
     }
     const lease = randomUUID()
-    tx.update(ref, { lease, attempts: mail.attempts + 1, firstAttemptAt: mail.firstAttemptAt ?? now })
+    const attempt = provider === 'resend' ? { deliveryProvider: provider, firstAttemptAt: mail.firstAttemptAt ?? now } : {}
+    tx.update(ref, { lease, attempts: mail.attempts + 1, ...attempt })
     tx.update(jobDoc, { nextAt: now + 2 * MINUTE })
     return { mail, ref, lease }
   })
 }
 
-async function dispatch(jobDoc: DocumentReference, now: number, deliver: Delivery, checkAddress: (uid: string, email: string) => Promise<boolean>) {
-  const claimed = await claim(jobDoc, now)
-  if (!claimed) return
+async function startSmtpAttempt(ref: DocumentReference, lease: string, now: number) {
+  return db().runTransaction(async (tx) => {
+    const record = await tx.get(ref)
+    if (record.get('lease') !== lease || record.get('status') !== 'queued' || record.get('firstAttemptAt') !== undefined) return false
+    // Commit an irreversible attempt before SMTP. A crash after this write cannot cause a second send.
+    tx.update(ref, { deliveryProvider: 'gmail', firstAttemptAt: now })
+    return true
+  })
+}
+
+async function dispatch(jobDoc: DocumentReference, now: number, delivery: Delivery | null, checkAddress: (uid: string, email: string) => Promise<boolean>) {
+  const claimed = await claim(jobDoc, now, delivery?.provider)
+  if (!claimed || !delivery) return
   const { mail, ref, lease } = claimed
-  let result: Awaited<ReturnType<Delivery>> | 'canceled' = 'retry'
+  let result: Awaited<ReturnType<Delivery['send']>> | 'canceled' = 'retry'
+  let smtpStarted = false
   try {
-    result = await checkAddress(mail.uid, mail.to) ? await deliver(mail) : 'canceled'
+    if (!await checkAddress(mail.uid, mail.to)) {
+      result = 'canceled'
+    } else if (delivery.provider === 'gmail') {
+      smtpStarted = await startSmtpAttempt(ref, lease, now)
+      if (!smtpStarted) return
+      result = await delivery.send(mail)
+    } else {
+      result = await delivery.send(mail)
+    }
   } catch {
-    // A transport failure is ambiguous. Reuse the same provider key when retrying.
+    result = smtpStarted ? 'uncertain' : 'retry'
   }
   await db().runTransaction(async (tx) => {
-    if ((await tx.get(ref)).get('lease') !== lease) return
+    const record = await tx.get(ref)
+    if (record.get('lease') !== lease || record.get('status') !== 'queued') return
     if (result === 'retry') {
       const backoff = Math.min(120, 2 ** Math.min(mail.attempts + 1, 7))
       tx.update(jobDoc, { nextAt: now + backoff * MINUTE })
       return
     }
-    tx.update(ref, { status: result === 'canceled' && mail.attempts ? 'uncertain' : result })
+    tx.update(ref, { status: result === 'canceled' && mail.firstAttemptAt !== undefined ? 'uncertain' : result })
     tx.delete(jobDoc)
   })
 }
@@ -161,40 +185,17 @@ async function verifiedAddress(uid: string, email: string) {
   }
 }
 
-const emailCopy = {
-  dose: ['A SaathiCare check-in is coming up', 'Open SaathiCare to review and record your scheduled check-in.'],
-  appointment: ['A SaathiCare appointment is coming up', 'Open SaathiCare to view your upcoming appointment.'],
-  missed: ['A SaathiCare check-in needs attention', 'A shared care circle has a missed check-in. Open SaathiCare to review the alert and acknowledge it.'],
-} as const
-
-async function sendEmail(mail: Parameters<Delivery>[0]): ReturnType<Delivery> {
-  const { RESEND_API_KEY, REMINDER_FROM_EMAIL, APP_URL } = process.env
-  if (!RESEND_API_KEY || !REMINDER_FROM_EMAIL || !APP_URL) return 'failed'
-  const url = new URL('/care', APP_URL)
-  const [subject, message] = emailCopy[mail.kind]
-  const result = await fetch('https://api.resend.com/emails', {
-    method: 'POST', signal: AbortSignal.timeout(15_000),
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': `saathicare/${mail.id}` },
-    body: JSON.stringify({ from: REMINDER_FROM_EMAIL, to: [mail.to], subject, text: `${message}\n\n${url.href}\n\nManage email preferences in your care circle.` }),
-  })
-  if (result.ok) {
-    const body = await result.json()
-    return typeof body.id === 'string' && body.id ? 'sent' : 'retry'
-  }
-  return result.status === 408 || result.status === 409 || result.status === 429 || result.status >= 500 ? 'retry' : 'failed'
-}
-
-export async function runReminders(now = Date.now(), deliver: Delivery = sendEmail, checkAddress = verifiedAddress) {
+export async function runReminders(now = Date.now(), delivery = createEmailDelivery(emailConfig()), checkAddress = verifiedAddress) {
   let evaluated = 0
   let errors = 0
   for (let batch = 0; batch < 5; batch++) {
     const due = await db().collection('reminderJobs').where('nextAt', '<=', now).orderBy('nextAt').limit(12).get()
     if (due.empty) break
     const results = await Promise.allSettled(due.docs.map((doc) => doc.get('kind') === 'mail'
-      ? dispatch(doc.ref, now, deliver, checkAddress) : materialize(doc.ref, now)))
+      ? dispatch(doc.ref, now, delivery, checkAddress) : materialize(doc.ref, now)))
     evaluated += results.length
     errors += results.filter((result) => result.status === 'rejected').length
     if (errors) break
   }
-  return { evaluated, errors, emailConfigured: emailConfigured() }
+  return { evaluated, errors, emailConfigured: delivery !== null }
 }

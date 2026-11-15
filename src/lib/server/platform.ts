@@ -20,9 +20,32 @@ function admin() {
 export function db() { return getFirestore(admin()) }
 export function auth() { return getAuth(admin()) }
 
-export function emailConfigured() {
-  return !!(process.env.RESEND_API_KEY && process.env.REMINDER_FROM_EMAIL && process.env.APP_URL)
+export type EmailConfig = { careUrl: string } & (
+  | { provider: 'gmail'; user: string; appPassword: string }
+  | { provider: 'resend'; from: string; apiKey: string }
+)
+
+export function emailConfig(): EmailConfig | null {
+  const env = process.env
+  if (env.REMINDER_EMAIL_ENABLED !== 'true' || !env.APP_URL || !URL.canParse(env.APP_URL)) return null
+  const appUrl = new URL(env.APP_URL)
+  if (appUrl.protocol !== 'https:' || appUrl.username || appUrl.password) return null
+  const careUrl = new URL('/care', appUrl).href
+
+  if (env.REMINDER_EMAIL_PROVIDER === 'gmail') {
+    const user = env.GMAIL_SMTP_USER?.trim()
+    const appPassword = env.GMAIL_SMTP_APP_PASSWORD?.trim()
+    if (user && z.email().safeParse(user).success && appPassword) return { provider: 'gmail', user, appPassword, careUrl }
+  }
+  if (env.REMINDER_EMAIL_PROVIDER === 'resend') {
+    const from = env.REMINDER_FROM_EMAIL?.trim()
+    const apiKey = env.RESEND_API_KEY?.trim()
+    if (from && apiKey) return { provider: 'resend', from, apiKey, careUrl }
+  }
+  return null
 }
+
+export function emailConfigured() { return emailConfig() !== null }
 
 export interface Actor { uid: string; email: string; verified: boolean }
 

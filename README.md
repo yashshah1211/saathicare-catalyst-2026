@@ -50,14 +50,14 @@ Use `SAATHICARE_TEST_URL` to point the browser smoke tests at a deployed service
 | Firebase Authentication | Email/password sign-in and verified identity. The server checks revocation for each authenticated request. |
 | Firestore | `users` index profile memberships. Each `careProfiles` record contains memberships, invitations, medications, dose events, appointments, activity, scoped notification feeds, and audit events. |
 | Cloud Scheduler and Cloud Run | An OIDC-authenticated scheduled request drains indexed `reminderJobs`. A dedicated scheduler identity and exact audience protect the endpoint even though the homepage is public. |
-| Resend | Generic medication, appointment, and missed-check-in emails. The app records provider acceptance, provider failure, or an uncertain outcome as appropriate. |
+| Gmail SMTP or Resend | Generic medication, appointment, and missed-check-in emails. The app records provider acceptance, provider failure, or an uncertain outcome as appropriate. |
 | Google Gen AI SDK | Gemini can select recorded event categories after owner consent. Source IDs, names, medication details, timestamps, and appointment details are rendered locally. |
 
 The Firebase browser client handles authentication only. Firestore rules deny direct client access. Every profile read or write checks membership in a transaction. The owner chooses either view-only or edit access and can revoke membership. Invitations use 128-bit secrets stored as hashes and are bound to a verified email. Codes expire after 48 hours and lock after five incorrect secret attempts by the intended recipient.
 
 Dose schedules recur in their own IANA timezone. Appointments store a UTC instant and their display timezone. For daylight-saving changes, a nonexistent local time shifts forward by the gap and an ambiguous time uses the earlier occurrence. The scheduler materializes the next day in advance. Medication email is normally due 10 minutes before a dose, appointment email 24 hours before a visit, and a missed check-in after the configured grace period. Snooze defers the check-in by 15 minutes and resets its grace window. Changing the grace period applies to newly scheduled check-ins. Missed events appear in the timeline whether or not caregiver email is enabled.
 
-Delivery uses a stable event-and-recipient key, a Firestore lease, and Resend’s idempotency window. Workers recheck current consent, membership, and the verified recipient address before sending. Email consent defaults to off. Owners must enable escalation and caregivers must separately opt in. App emails omit medication names, appointment details, and profile names. The product supports routine coordination. Follow your clinician’s instructions for medication and treatment.
+Delivery uses a stable event-and-recipient key and a Firestore lease. For Gmail SMTP, the worker records an attempt before calling SMTP. An unresolved attempt is marked uncertain and is never replayed, including after a lease expires or the provider changes. A definitive SMTP rejection is recorded as failed. Resend retries on the same provider within its idempotency window. Workers recheck current consent, membership, and the verified recipient address before sending. Email consent defaults to off. Owners must enable escalation and caregivers must separately opt in. App emails omit medication names, appointment details, and profile names. The product supports routine coordination. Follow your clinician’s instructions for medication and treatment.
 
 ## Cloud Run deployment
 
@@ -69,9 +69,17 @@ Run the PowerShell deployment script with a local environment YAML containing pu
 
 ```powershell
 ./scripts/deploy.ps1 -Project PROJECT_ID -EnvFile .env.cloud.yaml -ConfigureScheduler
-gcloud secrets create saathicare-resend --data-file=PATH_TO_LOCAL_SECRET_FILE --project=PROJECT_ID
-gcloud secrets add-iam-policy-binding saathicare-resend --project=PROJECT_ID --member=serviceAccount:saathicare-runtime@PROJECT_ID.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor
-gcloud run services update saathicare --project=PROJECT_ID --region=asia-south1 --update-secrets=RESEND_API_KEY=saathicare-resend:latest --update-env-vars=REMINDER_FROM_EMAIL=notifications@YOUR_VERIFIED_DOMAIN
 ```
 
-A Resend key and a verified sender are required for live reminder email. Use an approved inbox to validate delivery separately from provider acceptance. The public demo sends no email and does not call Gemini. The live handoff always has a deterministic fallback when Gemini is disabled or unavailable. Email delivery is disabled until a verified sender and key are configured. This release is a hackathon MVP and has no medical triage, emergency monitoring, or clinical decision logic.
+### Reminder email configuration
+
+Sending defaults to off. Either provider requires `REMINDER_EMAIL_ENABLED=true`, an explicit `REMINDER_EMAIL_PROVIDER`, and an HTTPS `APP_URL`. Configure these through Cloud Run runtime environment variables and Secret Manager. Deploy with `REMINDER_EMAIL_ENABLED=false` until a delivery test is approved.
+
+| Provider | Runtime values |
+| --- | --- |
+| `gmail` | Set `GMAIL_SMTP_USER` to the dedicated Gmail account. Map `GMAIL_SMTP_APP_PASSWORD` to Secret Manager secret `saathicare-gmail-app-password`, version `1` for the SaathiCare project. SMTP uses implicit TLS on `smtp.gmail.com:465`. |
+| `resend` | Set `REMINDER_FROM_EMAIL` to a verified sender and map `RESEND_API_KEY` from Secret Manager. |
+
+For Gmail, the Cloud Run runtime identity needs `roles/secretmanager.secretAccessor` on that specific secret. Validate mailbox delivery with an approved recipient separately from provider acceptance. A timeout or an interrupted worker can leave an uncertain outcome. This prevents a retry from duplicating a Gmail message that may already have been accepted.
+
+The public demo sends no email and does not call Gemini. The live handoff always has a deterministic fallback when Gemini is disabled or unavailable. This release is a hackathon MVP and has no medical triage, emergency monitoring, or clinical decision logic.
