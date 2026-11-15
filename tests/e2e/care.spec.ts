@@ -38,12 +38,26 @@ test('verified users create a routine and a read-only caregiver joins by passcod
   await page.getByLabel('Timezone').fill(zone)
   await page.getByRole('button', { name: 'Create profile' }).click()
   await expect(page.getByRole('heading', { name: 'Hello, Fictional.' })).toBeVisible()
+  const profileId = await page.getByLabel('Care profile').inputValue()
   await page.getByRole('button', { name: 'My routine' }).click()
-  await page.getByRole('button', { name: 'Add medication' }).click()
-  await page.getByLabel('Medication name').fill('Example tablet')
+  const addMedication = page.getByRole('button', { name: 'Add medication' })
+  const medicationName = page.getByLabel('Medication name')
+  await addMedication.press('Enter')
+  await expect(medicationName).toBeFocused()
+  await medicationName.fill('Example tablet')
+  await page.getByLabel('Dose times').fill('25:00')
+  await page.getByRole('button', { name: 'Save medication' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'times.0' })).toBeVisible()
+  await expect(medicationName).toHaveValue('Example tablet')
   await page.getByLabel('Dose times').fill(toLocalInput(due, zone).split('T')[1])
   await page.getByRole('button', { name: 'Save medication' }).click()
   await expect(page.getByRole('status')).toContainText('Medication saved.')
+  await expect(addMedication).toBeFocused()
+  const editMedication = page.getByRole('button', { name: 'Edit Example tablet' })
+  await editMedication.press('Enter')
+  await expect(medicationName).toBeFocused()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter')
+  await expect(editMedication).toBeFocused()
   await page.getByRole('button', { name: 'Add appointment' }).click()
   await page.getByLabel('Visit name').fill('Fictional clinic visit')
   await page.getByLabel('Location').fill('Example clinic')
@@ -58,23 +72,49 @@ test('verified users create a routine and a read-only caregiver joins by passcod
 
   await page.getByRole('button', { name: 'Care circle', exact: true }).click()
   await page.getByRole('button', { name: 'Invite caregiver' }).click()
+  await expect(page.getByLabel('Caregiver email')).toBeFocused()
   await page.getByLabel('Caregiver email').fill(caregiver)
   await page.getByRole('button', { name: 'Create passcode' }).click()
   const passcode = await page.locator('.passcode').innerText()
+  await expect(page.getByRole('heading', { name: 'Share this passcode' })).toBeFocused()
   await page.getByRole('button', { name: 'Close passcode' }).click()
+  await expect(page.getByRole('button', { name: 'Invite caregiver' })).toBeFocused()
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin })
   try {
     const second = await context.newPage()
     await signIn(second, caregiver, password)
     await second.getByLabel('Invitation passcode').fill(passcode)
+    const profilePath = `/api/care/profiles/${profileId}`
+    const profileRequest = second.waitForRequest(
+      (request) => new URL(request.url()).pathname === profilePath && request.method() === 'GET',
+      { timeout: 12_000 },
+    )
     await second.getByRole('button', { name: 'Join care circle' }).click()
     await expect(second.getByRole('heading', { name: 'Fictional’s care today' })).toBeVisible()
+    const authorization = await (await profileRequest).headerValue('authorization')
+    if (!authorization) throw new Error('Caregiver profile request did not include authorization')
+    const headers = { Authorization: authorization }
     await second.getByRole('button', { name: 'Shared routine' }).click()
     await expect(second.getByText('Fictional clinic visit')).toBeVisible()
     await expect(second.getByRole('button', { name: 'Add medication' })).toHaveCount(0)
     await second.getByRole('button', { name: 'Care circle', exact: true }).click()
     await second.getByRole('button', { name: 'Turn on alert emails' }).click()
     await expect(second.getByRole('button', { name: 'Turn off alert emails' })).toBeVisible()
+    const forbiddenEdit = await second.request.post(`${profilePath}/medications`, {
+      headers,
+      data: { name: 'Forbidden fixture', timezone: zone, times: ['10:00'], instructions: '' },
+    })
+    expect(forbiddenEdit.status()).toBe(403)
+
+    // Reload the owner view to fetch the new membership without waiting for the dashboard poll.
+    await page.reload()
+    await page.getByRole('button', { name: 'Care circle', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Remove access' })).toBeVisible()
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('button', { name: 'Remove access' }).click()
+    await expect(page.getByRole('status')).toContainText('Caregiver access removed.')
+    const revokedView = await second.request.get(profilePath, { headers })
+    expect(revokedView.status()).toBe(403)
   } finally { await context.close() }
 
   if (process.env.SAATHICARE_TEST_GEMINI === '1') {
