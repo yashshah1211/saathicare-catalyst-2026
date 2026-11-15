@@ -1,16 +1,19 @@
 # SaathiCare
 
-**Care that connects. Independence that lasts.** SaathiCare helps an older adult and their chosen caregivers coordinate medication check-ins and doctor appointments. The older adult decides who can access the routine, who can edit it, and whether missed check-ins trigger caregiver email.
+**Care that connects. Independence that lasts.** SaathiCare gives older adults a daily medication and appointment routine they can share with trusted caregivers. The older adult controls access, editing, and consent for caregiver alerts. Missed check-ins surface in a shared timeline, caregivers can acknowledge them, and care handoffs link back to the records behind each item.
 
 - [Public Cloud Run app](https://saathicare-171294241490.asia-south1.run.app)
 - [Interactive fictional demo](https://saathicare-171294241490.asia-south1.run.app/demo)
 - [Submission description and 90-second script](SUBMISSION.md)
 
+Production runs Cloud Run revision `saathicare-smtp-06bc25d2` in Mumbai from [verified source commit `06bc25d`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc). `main` includes assessment updates after that deployed commit. The controlled Gmail test reached the recipient’s inbox. Automated reminder email is disabled in production, and the scheduled reminder-to-inbox journey remains unverified.
+
 ## Run locally
 
-Use Node.js 22 or later and Java 21 for the Firebase emulators. Install dependencies with `npm ci`.
+Use Node.js 22 or later. Firebase emulators also require Java 21.
 
 ```sh
+npm ci
 npm run dev
 ```
 
@@ -24,6 +27,8 @@ npm run dev -- --webpack
 ```
 
 ## Verification
+
+The [Node 22 workflow](.github/workflows/verify.yml) installs from the lockfile and runs TypeScript, ESLint, unit tests, and the production build. Run Firestore and browser tests with the emulator setup below.
 
 ```sh
 npm run typecheck
@@ -42,16 +47,30 @@ npx firebase-tools emulators:exec --project demo-saathicare --only auth,firestor
 
 Use `SAATHICARE_TEST_URL` to point the browser smoke tests at a deployed service. For the full signed-in browser journey, run `npm run test:e2e` under the Firebase emulators with `FIREBASE_PROJECT_ID=demo-saathicare`. The browser suite otherwise runs the fictional demo journeys. Emulator integration tests cover Firestore transactions, timezone and recurrence logic, expiring and single-use invitations, role rejection, concurrent check-ins, and escalation and email idempotency with a controlled delivery result.
 
-## Architecture
+## Challenge coverage
 
-| Component | Responsibility |
+| Challenge requirement | Implementation | Verification |
+| --- | --- | --- |
+| Medication schedules and adherence | [Schedule CRUD and check-ins](src/lib/server/store.ts), [timezone and DST rules](src/lib/time.ts), [elder dashboard](src/components/dashboard.tsx) | [Time unit tests](tests/unit/time.test.ts), [Firestore tests](tests/integration/care.test.ts), and [browser check-ins](tests/e2e/demo.spec.ts) cover scheduling, midnight snooze, and duplicate protection. |
+| Doctor appointments | [Appointment CRUD](src/lib/server/store.ts) and [routine management](src/components/manage.tsx) | [Firestore tests](tests/integration/care.test.ts) exercise creation, editing, and deletion. [Browser tests](tests/e2e/care.spec.ts) verify a shared visit. |
+| Secure caretaker passcodes | [Email-bound, expiring invitations](src/lib/server/circle.ts) | [Firestore tests](tests/integration/care.test.ts) cover expiry, retry limits, revocation, and replay. [Browser tests](tests/e2e/care.spec.ts) exercise joining as a caregiver. |
+| Role-specific permissions and revocation | [Authenticated care routes](src/app/api/care/%5B...parts%5D/route.ts), [membership checks](src/lib/server/store.ts), and [access revocation](src/lib/server/circle.ts) | [Firestore tests](tests/integration/care.test.ts) reject outsiders and read-only writes. Revoked members lose access. |
+| Upcoming dose, missed check-in, and appointment reminders | [Scheduled worker](src/lib/server/reminders.ts) and [email adapters](src/lib/server/email.ts) | [Firestore tests](tests/integration/care.test.ts) exercise all three reminder types with simulated delivery. [SMTP unit tests](tests/unit/email.test.ts) cover the sending gate and transport outcomes. Live mailbox delivery was verified for one isolated test. Automated delivery remains disabled and unverified end to end. |
+| Elder autonomy, accessibility, and collaboration | [Invite, consent, and routine controls](src/components/manage.tsx), [larger-text dashboard and timeline](src/components/dashboard.tsx) | [Browser tests](tests/e2e/demo.spec.ts) check the keyboard skip link, larger text, mobile overflow, and caregiver acknowledgment. [Firestore tests](tests/integration/care.test.ts) verify two-sided alert consent. |
+| Innovation beyond reminders | [Consent-gated Gemini selection and deterministic handoff](src/lib/server/handoff.ts), [source details and acknowledgments](src/components/dashboard.tsx) | [Browser tests](tests/e2e/demo.spec.ts) check source details and acknowledgments. A consenting synthetic production profile returned Gemini selections that matched its Firestore records. |
+
+## Google services
+
+| Integration | Source and behavior |
 | --- | --- |
-| Next.js App Router | Accessible elder and caregiver views, isolated demo, and protected server routes |
-| Firebase Authentication | Email/password sign-in and verified identity. The server checks revocation for each authenticated request. |
-| Firestore | `users` index profile memberships. Each `careProfiles` record contains memberships, invitations, medications, dose events, appointments, activity, scoped notification feeds, and audit events. |
-| Cloud Scheduler and Cloud Run | An OIDC-authenticated scheduled request drains indexed `reminderJobs`. A dedicated scheduler identity and exact audience protect the endpoint even though the homepage is public. |
-| Gmail SMTP or Resend | Generic medication, appointment, and missed-check-in emails. The app records provider acceptance, provider failure, or an uncertain outcome as appropriate. |
-| Google Gen AI SDK | Gemini can select recorded event categories after owner consent. Source IDs, names, medication details, timestamps, and appointment details are rendered locally. |
+| Cloud Run and Cloud Build | The [Dockerfile](Dockerfile) builds the app. The deployed [health route](https://saathicare-171294241490.asia-south1.run.app/api/health) verifies service reachability. |
+| Firebase Authentication | The [browser workspace](src/components/care-workspace.tsx) uses email/password sign-in. The [server](src/lib/server/platform.ts) verifies Firebase ID tokens and checks revocation on each protected request. |
+| Firestore | [Profile-scoped reads and writes](src/lib/server/store.ts) hold schedules, dose events, memberships, and notification feeds. [Security rules](firestore.rules) deny direct browser access. |
+| Cloud Scheduler | The [worker endpoint](src/app/api/internal/reminders/route.ts) validates the dedicated identity and exact OIDC audience, then drains indexed `reminderJobs` in bounded batches. |
+| Gemini on Vertex AI | The [handoff service](src/lib/server/handoff.ts) sends event categories and their order after owner consent. Source IDs, names, medication details, and timestamps stay in SaathiCare. |
+| Secret Manager and Gmail SMTP | Cloud Run injects the pinned App Password at runtime. The [Gmail adapter](src/lib/server/email.ts) uses implicit TLS and tracks provider acceptance, rejection, or uncertainty. |
+
+## Security and scheduling
 
 The Firebase browser client handles authentication only. Firestore rules deny direct client access. Every profile read or write checks membership in a transaction. The owner chooses either view-only or edit access and can revoke membership. Invitations use 128-bit secrets stored as hashes and are bound to a verified email. Codes expire after 48 hours and lock after five incorrect secret attempts by the intended recipient.
 
@@ -89,3 +108,5 @@ On 15 November 2026, an isolated one-shot test reused the Gmail SMTP adapter fro
 Production has `REMINDER_EMAIL_ENABLED=false`. Cloud Scheduler has run the production worker successfully with that setting. Firestore emulator tests cover reminder jobs, consent, and duplicate-send controls using simulated delivery. The end-to-end journey from a scheduled reminder to a real inbox remains unverified.
 
 The public demo sends no email and does not call Gemini. The live handoff always has a deterministic fallback when Gemini is disabled or unavailable. This release is a hackathon MVP and has no medical triage, emergency monitoring, or clinical decision logic.
+
+Finalized Taken or Skipped check-ins have no correction workflow. The browser checks cover the primary desktop and mobile paths and selected accessibility behaviors.

@@ -4,7 +4,9 @@
 
 **Live** [Homepage](https://saathicare-171294241490.asia-south1.run.app) · [Interactive demo](https://saathicare-171294241490.asia-south1.run.app/demo)
 
-**Source for code assessment** [Deployed commit `06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc) · Cloud Run revision `saathicare-smtp-06bc25d2`
+**Source for code assessment** [Public `main`](https://github.com/yashshah1211/saathicare-catalyst-2026/tree/main) · [Challenge coverage and tests](README.md#challenge-coverage)
+
+**Production provenance** Cloud Run revision `saathicare-smtp-06bc25d2` was built from [commit `06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc). `main` includes follow-up assessment updates.
 
 ## 90-second demo
 
@@ -29,3 +31,5 @@
 | Gmail SMTP and Secret Manager | One isolated test used the deployed Gmail adapter and configured credential to send a synthetic message. Gmail accepted it, and the recipient confirmed inbox delivery. |
 
 Automated reminder email is disabled in production. The scheduled reminder-to-inbox journey remains unverified. Missed check-ins appear in the shared timeline, and emulator tests verify escalation and email deduplication with a simulated provider response.
+
+Finalized Taken or Skipped check-ins have no correction workflow.
