@@ -1,0 +1,13 @@
+.gcloudignore
+.git
+node_modules
+.next
+next-env.d.ts
+*.tsbuildinfo
+coverage
+test-results
+playwright-report
+*.log
+.env*
+.firebase
+.auth
