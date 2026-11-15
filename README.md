@@ -6,7 +6,7 @@
 - [Interactive fictional demo](https://saathicare-171294241490.asia-south1.run.app/demo)
 - [Submission description and 90-second script](SUBMISSION.md)
 
-Production runs Cloud Run revision `saathicare-smtp-06bc25d2` in Mumbai from [verified source commit `06bc25d`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc). `main` includes assessment updates after that deployed commit. The controlled Gmail test reached the recipient’s inbox. Automated reminder email is disabled in production, and the scheduled reminder-to-inbox journey remains unverified.
+Production runs Cloud Run revision `saathicare-quality-0f2f7746` in Mumbai from [verified source commit `0f2f77461f8039004e9b9ddae2646b9096609658`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/0f2f77461f8039004e9b9ddae2646b9096609658). The controlled Gmail test reached the recipient’s inbox on the earlier SMTP revision. Automated reminder email is disabled in production, and the scheduled reminder-to-inbox journey remains unverified.
 
 ## Run locally
 

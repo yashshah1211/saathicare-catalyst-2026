@@ -6,7 +6,7 @@
 
 **Source for code assessment** [Public `main`](https://github.com/yashshah1211/saathicare-catalyst-2026/tree/main) · [Challenge coverage and tests](README.md#challenge-coverage)
 
-**Production provenance** Cloud Run revision `saathicare-smtp-06bc25d2` was built from [commit `06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc). `main` includes follow-up assessment updates.
+**Production provenance** Cloud Run revision `saathicare-quality-0f2f7746` was built from [commit `0f2f77461f8039004e9b9ddae2646b9096609658`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/0f2f77461f8039004e9b9ddae2646b9096609658). The isolated Gmail SMTP test was performed against the earlier `saathicare-smtp-06bc25d2` revision.
 
 ## 90-second demo
 
