@@ -40,3 +40,10 @@ test('mobile demo is keyboard reachable and can postpone or skip', async ({ page
   await expect(page.getByRole('status')).toContainText('recorded as skipped')
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375)
 })
+
+test('sign-in configuration network failure offers a recovery action', async ({ page }) => {
+  await page.route('**/api/firebase-config', (route) => route.abort('failed'))
+  await page.goto('/care')
+  await expect(page.getByRole('alert').filter({ hasText: 'Could not load sign-in.' }))
+    .toHaveText('Could not load sign-in. Refresh the page to retry.')
+})

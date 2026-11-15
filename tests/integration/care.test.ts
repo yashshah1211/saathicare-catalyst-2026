@@ -188,4 +188,27 @@ describe('Firestore care circle and reminder pipeline', () => {
     expect(verify).not.toHaveBeenCalled()
     expect((await dashboard(target, actor, at)).notifications[0]).toMatchObject({ kind: 'appointment', status: 'failed' })
   })
+
+  it('retries a verification failure but never replays a thrown Gmail submission', async () => {
+    const at = localInstant('2026-11-23', '11:00', tz)
+    const { actor, target } = await appointmentReminderFixture(at, '2026-11-23T16:00')
+    const verify = vi.fn<() => Promise<boolean>>()
+      .mockRejectedValueOnce(new Error('Synthetic address lookup failure'))
+      .mockResolvedValue(true)
+    const send = vi.fn(async () => { throw new Error('Synthetic SMTP disconnect') })
+    const delivery = { provider: 'gmail', send } as const
+
+    expect((await runReminders(at, delivery, verify)).errors).toBe(0)
+    expect(send).not.toHaveBeenCalled()
+    expect((await dashboard(target, actor, at)).notifications[0].status).toBe('queued')
+    expect((await runReminders(at + MINUTE, delivery, verify)).errors).toBe(0)
+    expect(verify).toHaveBeenCalledTimes(1)
+
+    expect((await runReminders(at + 2 * MINUTE, delivery, verify)).errors).toBe(0)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect((await dashboard(target, actor, at)).notifications[0].status).toBe('uncertain')
+    expect((await runReminders(at + 6 * MINUTE, delivery, verify)).errors).toBe(0)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect((await dashboard(target, actor, at)).notifications[0].status).toBe('uncertain')
+  })
 })
