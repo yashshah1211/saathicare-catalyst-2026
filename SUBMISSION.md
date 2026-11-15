@@ -4,6 +4,8 @@
 
 **Live** [Homepage](https://saathicare-171294241490.asia-south1.run.app) · [Interactive demo](https://saathicare-171294241490.asia-south1.run.app/demo)
 
+**Source for code assessment** [Deployed commit `06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc`](https://github.com/yashshah1211/saathicare-catalyst-2026/commit/06bc25d27c77413b070bf1ea5b3dfc6635a8c9dc) · Cloud Run revision `saathicare-smtp-06bc25d2`
+
 ## 90-second demo
 
 | Time | What to show |
@@ -24,5 +26,6 @@
 | Firestore, Mumbai | The live browser test persisted a profile, dose check-in, appointment, and invitation. A direct Firestore read using the signed-in browser identity returned HTTP 403. |
 | Cloud Scheduler | Cloud Run logged successful OIDC-authenticated reminder ticks from the dedicated Scheduler identity. |
 | Gemini | The live synthetic profile enabled consent and generated a Gemini-selected handoff with traceable source records. |
+| Gmail SMTP and Secret Manager | One isolated test used the deployed Gmail adapter and configured credential to send a synthetic message. Gmail accepted it, and the recipient confirmed inbox delivery. |
 
-Live reminder email is disabled in this deployment. Missed check-ins remain visible in the shared timeline. Emulator tests verify the escalation and email deduplication logic with a controlled provider response.
+Automated reminder email is disabled in production. The scheduled reminder-to-inbox journey remains unverified. Missed check-ins appear in the shared timeline, and emulator tests verify escalation and email deduplication with a simulated provider response.

@@ -82,4 +82,10 @@ Sending defaults to off. Either provider requires `REMINDER_EMAIL_ENABLED=true`,
 
 For Gmail, the Cloud Run runtime identity needs `roles/secretmanager.secretAccessor` on that specific secret. Validate mailbox delivery with an approved recipient separately from provider acceptance. A timeout or an interrupted worker can leave an uncertain outcome. This prevents a retry from duplicating a Gmail message that may already have been accepted.
 
+### Gmail delivery verification
+
+On 15 November 2026, an isolated one-shot test reused the Gmail SMTP adapter from Cloud Run revision `saathicare-smtp-06bc25d2`. It sent one synthetic message using the configured Secret Manager credential. Gmail accepted the message, and the recipient confirmed it arrived in their inbox.
+
+Production has `REMINDER_EMAIL_ENABLED=false`. Cloud Scheduler has run the production worker successfully with that setting. Firestore emulator tests cover reminder jobs, consent, and duplicate-send controls using simulated delivery. The end-to-end journey from a scheduled reminder to a real inbox remains unverified.
+
 The public demo sends no email and does not call Gemini. The live handoff always has a deterministic fallback when Gemini is disabled or unavailable. This release is a hackathon MVP and has no medical triage, emergency monitoring, or clinical decision logic.
